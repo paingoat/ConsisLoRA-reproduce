@@ -17,20 +17,35 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+def _get_repo_root() -> Path:
+    """Jupyter has no `__file__` in a cell; script runs from `notebooks/` with `__file__`."""
+    if "__file__" in globals():
+        return Path(globals()["__file__"]).resolve().parent.parent
+    p = Path.cwd().resolve()
+    for up in (p, p.parent):
+        if (up / "pipeline_demo.py").is_file() and (up / "train_consislora.py").is_file():
+            return up
+    raise FileNotFoundError(
+        f"Could not find repo root (expected pipeline_demo.py). cwd={p}. "
+        "Open the project folder or `cd` to the ConsisLoRA repo root, then re-run the cell."
+    )
+
+
+REPO_ROOT = _get_repo_root()
+os.chdir(REPO_ROOT)
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import matplotlib.pyplot as plt
 import torch
 from diffusers import EulerDiscreteScheduler
 from PIL import Image
 from tqdm.auto import tqdm
 
+# Local repo modules (must come after sys.path)
 from pipeline_demo import StableDiffusionXLPipelineLoraGuidance
 from utils import load_pil_image
-
-# Repo root: parent of `notebooks/`
-REPO_ROOT = Path(__file__).resolve().parent.parent
-os.chdir(REPO_ROOT)
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 # Hugging Face model cache (RunPod: use persistent / workspace volume)
 if Path("/workspace").is_dir():
