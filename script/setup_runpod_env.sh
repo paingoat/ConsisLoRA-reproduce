@@ -29,19 +29,20 @@ install_miniconda_linux() {
     aarch64) url="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh" ;;
     *) echo "Unsupported architecture: $(uname -m). Install Miniconda manually." >&2; return 1 ;;
   esac
+  # Installer must be saved as a path ending in ".sh" — upstream checks: echo "$0" | grep '\.sh$'
+  # (using mktemp alone yields /tmp/tmp.XXXX, which fails with "not . or source").
   echo "==> conda not found — installing Miniconda -> ${prefix} (batch, -b)…"
-  tmp="$(mktemp)"
+  sh_install="${TMPDIR:-/tmp}/miniconda3-latest-linux-install-$$.sh"
   if command -v wget &>/dev/null; then
-    wget -q "$url" -O "$tmp"
+    wget -q "$url" -O "$sh_install"
   elif command -v curl &>/dev/null; then
-    curl -fsSL "$url" -o "$tmp"
+    curl -fsSL "$url" -o "$sh_install"
   else
     echo "Need wget or curl to download Miniconda." >&2
-    rm -f "$tmp"
     return 1
   fi
-  bash "$tmp" -b -p "$prefix"
-  rm -f "$tmp"
+  /bin/bash "$sh_install" -b -p "$prefix"
+  rm -f "$sh_install"
   echo "==> Miniconda installed at ${prefix}"
 }
 
