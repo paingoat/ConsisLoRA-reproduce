@@ -5,6 +5,8 @@
 # - **Hugging Face cache:** `HF_HOME` defaults to `/workspace/huggingface` on RunPod, else `~/.cache/huggingface` locally.
 # - Trains 5 **style** LoRAs (two-stage, same as `script/train_style.sh`), 2 **content** LoRAs (`script/train_content.sh`), then runs **style-only** and **content×style** inference.
 # - **Section order (A → C → B → D):** all training first, then load SDXL for inference. This avoids GPU memory spikes from keeping the full pipeline in memory while `accelerate launch` trains.
+# - **LoRA output dirs (under repo root, created with `mkdir` before training):** `lora-weights/style/{name}/` (style stage 1), `lora-weights/style_retrain/{name}/` (style stage 2 — use this for inference), `lora-weights/content/{name}/`. Weight files are written by `train_consislora.py` when training finishes, not committed in git.
+# - **Section E:** optional upload of the whole `lora-weights/` tree to [paingoat/ConsisLoRA-test](https://huggingface.co/paingoat/ConsisLoRA-test) using `HfApi.upload_folder` (see [Hub upload guide](https://huggingface.co/docs/huggingface_hub/guides/upload)). Set `HF_TOKEN` in a local `.env` (see `.env.example`).
 
 # %% [markdown]
 # ## Config
@@ -19,6 +21,7 @@ import matplotlib.pyplot as plt
 import torch
 from diffusers import EulerDiscreteScheduler
 from PIL import Image
+from tqdm.auto import tqdm
 
 from pipeline_demo import StableDiffusionXLPipelineLoraGuidance
 from utils import load_pil_image
@@ -44,6 +47,9 @@ LORA_CONTENT = REPO_ROOT / "lora-weights" / "content"
 DATA_STYLE = REPO_ROOT / "data_demo" / "style"
 DATA_CONTENT = REPO_ROOT / "data_demo" / "content"
 OUT_INFER = REPO_ROOT / "outputs" / "runpod_batch"
+
+# Hugging Face Hub — section E (upload); token from `.env` as HF_TOKEN
+HF_REPO_ID = "paingoat/ConsisLoRA-test"
 
 STYLE_NAMES = ["rococo", "baroque", "monet", "shinkai", "ukyoe"]
 CONTENT_NAMES = ["rio", "uit"]
@@ -99,9 +105,33 @@ def show_grid_pil(
     plt.show()
 
 
-def _run(cmd: list, cwd: Path) -> None:
-    print(">", " ".join(cmd))
-    subprocess.run(cmd, cwd=cwd, check=True)
+def _run_training(
+    cmd: list,
+    cwd: Path,
+    *,
+    title: str | None = None,
+) -> None:
+    """Run `accelerate launch ...` with unbuffered child stdout so `tqdm` in `train_consislora` streams in the notebook."""
+    if title:
+        print("\n" + "=" * 72, flush=True)
+        print(f"  {title}", flush=True)
+        print("=" * 72 + "\n", flush=True)
+    print(">", " ".join(cmd), flush=True)
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    if "COLUMNS" not in env:
+        env["COLUMNS"] = "120"
+    try:
+        subprocess.run(
+            cmd,
+            cwd=cwd,
+            check=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"\n[error] Command failed with exit code {e.returncode}", flush=True)
+        raise
+    if title:
+        print(f"\n[ok] {title}\n", flush=True)
 
 
 def build_sdxl_pipeline() -> StableDiffusionXLPipelineLoraGuidance:
@@ -129,7 +159,7 @@ def train_style_two_stage(name: str) -> None:
 
     ck1500 = out1 / f"checkpoint-{MAX_TRAIN_STEPS_STYLE_STAGE1}"
     if not ck1500.is_dir():
-        _run(
+        _run_training(
             [
                 "accelerate",
                 "launch",
@@ -149,11 +179,12 @@ def train_style_two_stage(name: str) -> None:
                 "--seed=0",
             ],
             REPO_ROOT,
+            title=f"Style {name!r} — stage 1 (A [v], → {out1.relative_to(REPO_ROOT)})",
         )
     else:
-        print(f"Skip stage-1 (found {ck1500}) for style={name}")
+        print(f"Skip stage-1 (found {ck1500}) for style={name}", flush=True)
 
-    _run(
+    _run_training(
         [
             "accelerate",
             "launch",
@@ -174,6 +205,7 @@ def train_style_two_stage(name: str) -> None:
             "--seed=0",
         ],
         REPO_ROOT,
+        title=f"Style {name!r} — stage 2 (style retrain, → {out2.relative_to(REPO_ROOT)})",
     )
 
 
@@ -183,7 +215,7 @@ def train_content(name: str) -> None:
         raise FileNotFoundError(image_path)
     out = LORA_CONTENT / name
     out.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    _run_training(
         [
             "accelerate",
             "launch",
@@ -203,27 +235,26 @@ def train_content(name: str) -> None:
             "--seed=0",
         ],
         REPO_ROOT,
+        title=f"Content {name!r} (A [c], → {out.relative_to(REPO_ROOT)})",
     )
 
 
 # %% [markdown]
 # ## A) Train all style LoRAs
 #
-# Runs two-stage training per `STYLE_NAMES` (see `script/train_style.sh`).
+# Runs two-stage training per `STYLE_NAMES` (see `script/train_style.sh`). The outer `tqdm` bar advances once per **style**; inside each `accelerate` run, `train_consislora.py` prints its own **step** `tqdm` to the cell output. `PYTHONUNBUFFERED=1` is set for the child process so that inner progress line updates appear live in Jupyter when possible.
 
 # %%
-for _style in STYLE_NAMES:
-    print(f"=== Training style: {_style} ===")
+for _style in tqdm(STYLE_NAMES, desc="[A] Style LoRAs", unit="style"):
     train_style_two_stage(_style)
 
 # %% [markdown]
 # ## C) Train content LoRAs (rio, uit)
 #
-# Run after **A** so the SDXL pipeline is not loaded yet (saves GPU memory for `accelerate`).
+# Run after **A** so the SDXL pipeline is not loaded yet (saves GPU memory for `accelerate`). Same progress display as in **A** (outer `tqdm` + step bar from the training script).
 
 # %%
-for _c in CONTENT_NAMES:
-    print(f"=== Training content: {_c} ===")
+for _c in tqdm(CONTENT_NAMES, desc="[C] Content LoRAs", unit="run"):
     train_content(_c)
 
 # %% [markdown]
@@ -349,3 +380,46 @@ for j in range(len(CONTENT_NAMES), axes.shape[1]):
 plt.suptitle("Reference images (data_demo)", fontsize=10)
 plt.tight_layout()
 plt.show()
+
+# %% [markdown]
+# ## E) Upload `lora-weights` to Hugging Face Hub
+#
+# Pushes the entire local `lora-weights/` directory to **`paingoat/ConsisLoRA-test`** under remote path `lora-weights/`, using [`HfApi.upload_folder`](https://huggingface.co/docs/huggingface_hub/guides/upload#upload-a-folder) (one commit). The model repo is created if it does not exist.
+#
+# **Auth:** create a file `.env` in the repository root (see `.env.example`, not committed — listed in `.gitignore`) with:
+#
+# ```env
+# HF_TOKEN=hf_...
+# ```
+#
+# Use a token with **write** access from [Hugging Face settings](https://huggingface.co/settings/tokens). For very large trees, consider [`upload_large_folder`](https://huggingface.co/docs/huggingface_hub/guides/upload#upload-a-large-folder) in a separate script.
+
+# %%
+from dotenv import load_dotenv
+from huggingface_hub import HfApi
+
+load_dotenv(REPO_ROOT / ".env")
+hf_token = os.environ.get("HF_TOKEN", "").strip()
+if not hf_token:
+    raise ValueError(
+        "Missing HF_TOKEN. Add a `.env` file in the repo root (see .env.example) with a write token from "
+        "https://huggingface.co/settings/tokens"
+    )
+
+_lora_root = REPO_ROOT / "lora-weights"
+if not _lora_root.is_dir():
+    raise FileNotFoundError(f"No folder to upload: {_lora_root}")
+if not any(_lora_root.iterdir()):
+    raise FileNotFoundError(f"Folder is empty (train first): {_lora_root}")
+
+_api = HfApi(token=hf_token)
+_api.create_repo(repo_id=HF_REPO_ID, repo_type="model", exist_ok=True)
+_commit = _api.upload_folder(
+    folder_path=str(_lora_root),
+    repo_id=HF_REPO_ID,
+    repo_type="model",
+    path_in_repo="lora-weights",
+    commit_message="Upload lora-weights (ConsisLoRA batch)",
+)
+print(_commit)
+print(f"Hub tree: https://huggingface.co/{HF_REPO_ID}/tree/main/lora-weights")

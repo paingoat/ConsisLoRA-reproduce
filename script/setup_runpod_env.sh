@@ -40,6 +40,7 @@ echo "==> Accelerate: non-interactive default (single GPU, fp16; matches trainin
 mkdir -p "${HOME}/.cache/huggingface/accelerate"
 cp "${ROOT}/script/accelerate_default_config.yaml" "${HOME}/.cache/huggingface/accelerate/default_config.yaml"
 
+echo "==> Hugging Face upload (notebook section E): copy .env.example to .env and set HF_TOKEN"
 echo "==> Optional HF cache on RunPod (uncomment in your profile if you use /workspace):
 #    export HF_HOME=/workspace/huggingface
 #    mkdir -p \"\$HF_HOME\"
