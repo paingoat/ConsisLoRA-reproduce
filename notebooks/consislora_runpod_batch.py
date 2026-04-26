@@ -13,6 +13,7 @@
 
 # %%
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -127,6 +128,11 @@ def _run_training(
     title: str | None = None,
 ) -> None:
     """Run `accelerate launch ...` with unbuffered child stdout so `tqdm` in `train_consislora` streams in the notebook."""
+    # Robust launcher: if `accelerate` CLI is not on PATH in the current kernel,
+    # fallback to module invocation using the same Python executable.
+    if len(cmd) >= 2 and cmd[0] == "accelerate" and cmd[1] == "launch":
+        if shutil.which("accelerate") is None:
+            cmd = [sys.executable, "-m", "accelerate.commands.launch", *cmd[2:]]
     if title:
         print("\n" + "=" * 72, flush=True)
         print(f"  {title}", flush=True)
